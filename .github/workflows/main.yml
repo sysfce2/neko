@@ -35,7 +35,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux${{ matrix.name_suffix }}-${{ matrix.arch }}-binaries
-          path: bin/${{ matrix.link_type }}/linux/${{ matrix.arch }}/neko-${{ env.NEKO_VERSION }}-linux64.tar.gz
+          path: bin/${{ matrix.link_type }}/linux/${{ matrix.arch }}/neko-${{ env.NEKO_VERSION }}-linux*.tar.gz
 
   mac-build:
     name: mac
@@ -103,7 +103,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mac${{ matrix.name_suffix }}-${{ matrix.arch }}-binaries
-          path: bin/neko-${{ env.NEKO_VERSION }}-osx64.tar.gz
+          path: bin/neko-${{ env.NEKO_VERSION }}-osx*.tar.gz
 
   windows-build:
     name: windows
@@ -221,6 +221,56 @@ jobs:
           name: chocolatey
           path: extra/chocolatey/pack/
 
+  mac-universal:
+    name: mac universal
+    needs: [mac-build]
+    runs-on: macos-latest
+
+    env:
+      INPUT_AMD64: mac-static-amd64-binaries
+      INPUT_ARM64: mac-static-arm64-binaries
+
+    steps:
+      - name: Download ${{ env.INPUT_AMD64 }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.INPUT_AMD64 }}
+          path: ${{ env.INPUT_AMD64 }}
+
+      - name: Download ${{ env.INPUT_ARM64 }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.INPUT_ARM64 }}
+          path: ${{ env.INPUT_ARM64 }}
+
+      - name: Create universal binaries
+        run: |
+          tar_filename_amd64=$(basename $INPUT_AMD64/neko-*-osx64.tar.gz .tar.gz)
+          OUTPUT=${tar_filename_amd64/osx64/osx-universal}
+
+          mkdir $OUTPUT
+
+          # put amd64 files straight into output to make sure all non-binary files are also included
+          tar -xf $INPUT_AMD64/neko-*.tar.gz \
+            -C $OUTPUT --strip-components=1
+          tar -xf $INPUT_ARM64/neko-*.tar.gz \
+            -C $INPUT_ARM64 --strip-components=1
+
+          for filename in $OUTPUT/{*.ndll,libneko.*.*.*.dylib,neko,nekoc,nekoml,nekotools}; do
+            filename_amd64=$filename
+            filename_arm64=${filename/$OUTPUT/$INPUT_ARM64}
+            lipo -create -output $filename $filename_amd64 $filename_arm64
+          done
+
+          file $OUTPUT/*
+          tar -czvf $OUTPUT.tar.gz $OUTPUT
+
+      - name: Upload universal binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-static-universal-binaries
+          path: neko-*-osx-universal.tar.gz
+
   deploy-s3:
     name: deploy s3
     needs: [windows-build, package-choco, mac-build, linux-build]
@@ -234,21 +284,25 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: linux-static-amd64-binaries
+          path: linux-static-amd64-binaries
 
       - name: Download linux-static-arm64-binaries
         uses: actions/download-artifact@v4
         with:
           name: linux-static-arm64-binaries
+          path: linux-static-arm64-binaries
 
       - name: Download mac-static-amd64-binaries
         uses: actions/download-artifact@v4
         with:
           name: mac-static-amd64-binaries
+          path: mac-static-amd64-binaries
 
       - name: Download mac-static-arm64-binaries
         uses: actions/download-artifact@v4
         with:
           name: mac-static-arm64-binaries
+          path: mac-static-arm64-binaries
 
       - name: Download windows-vs2017-binaries
         uses: actions/download-artifact@v4
@@ -288,14 +342,14 @@ jobs:
           COMMIT_HASH=`git rev-parse HEAD`
           COMMIT_HASH_SHORT=${GITHUB_SHA:0:7}
           COMMIT_DATE=`TZ=UTC git show --quiet --date='format-local:%Y-%m-%d' --format="%cd"`
-          FILE_NAME=neko_${COMMIT_DATE}_$(steps.extract_branch.outputs.branch)_${COMMIT_HASH_SHORT}
+          FILE_NAME=neko_${COMMIT_DATE}_${{ steps.extract_branch.outputs.branch }}_${COMMIT_HASH_SHORT}
           aws s3 cp linux-static-amd64-binaries/neko-*.tar.gz   $HXBUILDS_S3ADDR/neko/linux64/${FILE_NAME}.tar.gz
           aws s3 cp linux-static-arm64-binaries/neko-*.tar.gz   $HXBUILDS_S3ADDR/neko/linux-arm64/${FILE_NAME}.tar.gz
           aws s3 cp mac-static-amd64-binaries/neko-*.tar.gz     $HXBUILDS_S3ADDR/neko/mac/${FILE_NAME}.tar.gz
           aws s3 cp mac-static-arm64-binaries/neko-*.tar.gz     $HXBUILDS_S3ADDR/neko/mac-arm64/${FILE_NAME}.tar.gz
-          aws s3 cp windows-vs2017-binaries/neko-*.zip          $HXBUILDS_S3ADDR/neko/windows/${FILE_NAME}.zip
-          aws s3 cp windows64-vs2017-binaries/neko-*.zip        $HXBUILDS_S3ADDR/neko/windows64/${FILE_NAME}.zip
-          aws s3 cp chocolatey/*.nupkg                          $HXBUILDS_S3ADDR/neko/windows64-choco/
+          aws s3 cp neko-*-win.zip                              $HXBUILDS_S3ADDR/neko/windows/${FILE_NAME}.zip
+          aws s3 cp neko-*-win64.zip                            $HXBUILDS_S3ADDR/neko/windows64/${FILE_NAME}.zip
+          aws s3 cp neko.*.nupkg                                $HXBUILDS_S3ADDR/neko/windows64-choco/
 
       - name: Update "latest"
         if: github.ref == 'refs/heads/master'
@@ -308,16 +362,16 @@ jobs:
           set -ex
           aws s3 cp linux-static-amd64-binaries/neko-*.tar.gz   $HXBUILDS_S3ADDR/neko/linux64/neko_latest.tar.gz
           aws s3 cp linux-static-arm64-binaries/neko-*.tar.gz   $HXBUILDS_S3ADDR/neko/linux-arm64/neko_latest.tar.gz
-          aws s3 cp mac-static-arm64-binaries/neko-*.tar.gz     $HXBUILDS_S3ADDR/neko/mac/neko_latest.tar.gz
+          aws s3 cp mac-static-amd64-binaries/neko-*.tar.gz     $HXBUILDS_S3ADDR/neko/mac/neko_latest.tar.gz
           aws s3 cp mac-static-arm64-binaries/neko-*.tar.gz     $HXBUILDS_S3ADDR/neko/mac-arm64/neko_latest.tar.gz
-          aws s3 cp windows-vs2017-binaries/neko-*.zip          $HXBUILDS_S3ADDR/neko/windows/neko_latest.zip
-          aws s3 cp windows64-vs2017-binaries/neko-*.zip        $HXBUILDS_S3ADDR/neko/windows64/neko_latest.zip
+          aws s3 cp neko-*-win.zip                              $HXBUILDS_S3ADDR/neko/windows/neko_latest.zip
+          aws s3 cp neko-*-win64.zip                            $HXBUILDS_S3ADDR/neko/windows64/neko_latest.zip
 
           # Chocolatey packages have to be named with version number,
           # so let's use web redirection to keep the original file name.
           [[ "$HXBUILDS_S3ADDR" =~ s3://([^/]+)(.*) ]] && HXBUILDS_S3BUCKET="${BASH_REMATCH[1]}" && HXBUILDS_S3PATH="${BASH_REMATCH[2]}"
-          [[ `echo chocolatey/*.nupkg` =~ Chocolatey/(.+) ]] && FILE_NAME="${BASH_REMATCH[1]}"
-          aws s3 cp $HXBUILDS_S3ADDR/neko/windows64-choco/${FILE_NAME}   $HXBUILDS_S3ADDR/neko/windows64-choco/neko_latest.nupkg   --acl public-read --website-redirect "${HXBUILDS_S3ADDR}/neko/windows64-choco/${FILE_NAME}"
+          FILE_NAME=$(echo neko.*.nupkg)
+          aws s3 cp $HXBUILDS_S3ADDR/neko/windows64-choco/${FILE_NAME}   $HXBUILDS_S3ADDR/neko/windows64-choco/neko_latest.nupkg   --acl public-read --website-redirect "${HXBUILDS_S3PATH}/neko/windows64-choco/${FILE_NAME}"
 
   deploy-ppa:
     name: deploy ppa
